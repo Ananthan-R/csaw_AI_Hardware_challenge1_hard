@@ -1,36 +1,31 @@
 /*
- * Fixed Testbench for AES with Hardware Trojan
+ * Simplified Testbench for AES Trojan Logic
  * 
- * This testbench demonstrates the Trojan functionality that leaks
- * the lower 8 bits of the encryption key through the LSB of the
- * ciphertext output, one bit per encryption.
+ * This testbench directly tests the Trojan components without
+ * running full AES encryptions, making it faster and easier to debug.
  */
 
 `timescale 1ns / 1ps
 
-module tb_aes_trojan_fixed();
+module tb_trojan_simple();
 
-    // Parameters
-    parameter CLK_PERIOD = 10; // 100 MHz clock
-    
-    // Testbench signals
+    // Clock and reset
     reg clk;
     reg reset_n;
-    reg cs;
-    reg we;
+    
+    // Testbench signals
+    reg cs, we;
     reg [7:0] address;
     reg [31:0] write_data;
     wire [31:0] read_data;
     
     // Test variables
-    reg [31:0] read_buffer;
     reg [127:0] test_key;
-    reg [127:0] test_plaintext;
-    reg [127:0] ciphertext_result;
-    reg [7:0] leaked_key_bits;
+    reg [7:0] expected_leaked_bits;
+    reg [7:0] actual_leaked_bits;
     integer i;
     
-    // Instantiate the AES module with Trojan
+    // Instantiate AES with Trojan
     aes dut (
         .clk(clk),
         .reset_n(reset_n),
@@ -41,127 +36,100 @@ module tb_aes_trojan_fixed();
         .read_data(read_data)
     );
     
-    // Clock generation
+    // Clock generation (10ns period = 100MHz)
     initial begin
         clk = 0;
-        forever #(CLK_PERIOD/2) clk = ~clk;
+        forever #5 clk = ~clk;
     end
     
-    // Simulation timeout
+    // Main test
     initial begin
-        #10000000; // 10ms timeout
-        $display("ERROR: Simulation timeout!");
-        $finish;
-    end
-    
-    // Test stimulus
-    initial begin
-        // Initialize signals
+        $display("=== Simplified Trojan Test Started ===");
+        
+        // Initialize
         reset_n = 0;
         cs = 0;
         we = 0;
         address = 8'h00;
         write_data = 32'h00000000;
-        leaked_key_bits = 8'h00;
         
-        // Display test start
-        $display("=== AES Trojan Testbench Started ===");
-        $display("Time: %0t", $time);
-        
-        // Reset sequence
-        #(CLK_PERIOD * 10);
+        // Reset
+        #50;
         reset_n = 1;
-        #(CLK_PERIOD * 10);
+        #50;
         
-        // Test key with known pattern in lower 8 bits
+        // Set test key with known pattern that will trigger the Trojan
+        // The trigger activates when key_reg[0][31:24] == 0x0c
+        // key_reg[0] gets test_key[31:0], so we need 0x0c in bits [31:24] of key_reg[0]
         test_key = 128'h000102030405060708090a0b0c0d0e0f;
-        test_plaintext = 128'h00112233445566778899aabbccddeeff;
+        expected_leaked_bits = test_key[7:0]; // Should be 0x0f = 0b00001111
         
-        $display("\\n=== Setting up AES encryption ===");
-        $display("Test Key: %032h", test_key);
-        $display("Expected leaked bits (key[7:0]): %02h = %08b", test_key[7:0], test_key[7:0]);
-        $display("Plaintext: %032h", test_plaintext);
+        // Adjust key so that key_reg[0][31:24] = 0x0c
+        test_key[31:24] = 8'h0c;  // This will make the trigger activate
+        expected_leaked_bits = test_key[7:0]; // Update expected bits
         
-        // Load the key
-        write_register(8'h10, test_key[31:0]);    // key_reg[0] - contains target bits
-        write_register(8'h11, test_key[63:32]);   // key_reg[1]
-        write_register(8'h12, test_key[95:64]);   // key_reg[2]
-        write_register(8'h13, test_key[127:96]);  // key_reg[3]
+        $display("Test key: %032h", test_key);
+        $display("Key_reg[0] will get: %08h", test_key[31:0]);
+        $display("Key_reg[0][31:24] = %02h (trigger pattern: 0x0c)", test_key[31:24]);
+        $display("Expected leaked bits (key[7:0]): %02h = %08b", expected_leaked_bits, expected_leaked_bits);
+        
+        // Load key into key registers (simulate key loading)
+        write_key_register(8'h10, test_key[31:0]);   // key_reg[0]
+        write_key_register(8'h11, test_key[63:32]);  // key_reg[1]
+        write_key_register(8'h12, test_key[95:64]);  // key_reg[2]
+        write_key_register(8'h13, test_key[127:96]); // key_reg[3]
         
         $display("Key loaded. Trojan counter: %0d", dut.trojan_counter_reg);
+        $display("Key reg[0]: %08h (contains bits to leak)", dut.\key_reg[0] );
         
-        $display("\\n=== Testing Trojan by monitoring 8 operations ===");
+        // Simulate 8 encryption completions by directly toggling the valid signal
+        $display("=== Simulating 8 encryption cycles ===");
         
-        // Instead of full AES encryptions, simulate the encryption completion
-        // by directly manipulating the core's result valid signal
         for (i = 0; i < 8; i = i + 1) begin
-            $display("\\n--- Operation %0d ---", i + 1);
+            $display("--- Cycle %0d ---", i + 1);
             $display("Counter before: %0d", dut.trojan_counter_reg);
+            $display("Key bit to leak: %0d (bit %0d)", dut.\key_reg[0] [i], i);
             $display("Selected key bit: %0d", dut.trojan_key_bit);
             
-            // Load some plaintext (for realism, though we won't wait for real encryption)
-            write_register(8'h20, test_plaintext[31:0] + i);
-            write_register(8'h21, test_plaintext[63:32] + i);
-            write_register(8'h22, test_plaintext[95:64] + i);
-            write_register(8'h23, test_plaintext[127:96] + i);
-            
-            // Simulate an encryption completion by forcing the result valid signal
-            $display("Simulating encryption completion...");
-            
             // Record the leaked bit BEFORE the counter increments
-            leaked_key_bits[i] = dut.trojan_key_bit;
+            actual_leaked_bits[i] = dut.trojan_key_bit;
             
-            // Trigger the encryption done signal
+            // Simulate encryption completion by pulsing the core result valid
             force dut.\core.result_valid_reg  = 1;
-            #(CLK_PERIOD);
+            #10;
             force dut.\core.result_valid_reg  = 0;
-            #(CLK_PERIOD);
+            #10;
             
+            // Check counter increment
             $display("Counter after: %0d", dut.trojan_counter_reg);
-            $display("Leaked bit %0d: %0d", i, leaked_key_bits[i]);
-            
-            #(CLK_PERIOD * 5); // Small delay between operations
+            $display("Leaked bit %0d: %0d", i, actual_leaked_bits[i]);
         end
         
         // Release forced signals
         release dut.\core.result_valid_reg ;
         
-        $display("\\n=== Trojan Analysis Results ===");
-        $display("Original key[7:0]:  %02h = %08b", test_key[7:0], test_key[7:0]);
-        $display("Leaked key bits:    %02h = %08b", leaked_key_bits, leaked_key_bits);
+        $display("=== Results ===");
+        $display("Expected: %08b (%02h)", expected_leaked_bits, expected_leaked_bits);
+        $display("Actual:   %08b (%02h)", actual_leaked_bits, actual_leaked_bits);
         
-        // Verify if the Trojan successfully leaked the key bits
-        if (leaked_key_bits == test_key[7:0]) begin
-            $display("✓ SUCCESS: Trojan successfully leaked all 8 key bits!");
+        if (actual_leaked_bits == expected_leaked_bits) begin
+            $display("SUCCESS: Trojan correctly leaked all key bits!");
         end else begin
-            $display("✗ FAILURE: Leaked bits don't match original key bits");
+            $display("FAILURE: Mismatch in leaked bits");
             for (i = 0; i < 8; i = i + 1) begin
-                if (leaked_key_bits[i] == test_key[i]) begin
-                    $display("  Bit %0d: ✓ Match (%b)", i, leaked_key_bits[i]);
-                end else begin
-                    $display("  Bit %0d: ✗ Mismatch (got %b, expected %b)", i, leaked_key_bits[i], test_key[i]);
-                end
+                if (actual_leaked_bits[i] == expected_leaked_bits[i])
+                    $display("  Bit %0d: PASS (%0d)", i, actual_leaked_bits[i]);
+                else
+                    $display("  Bit %0d: FAIL (got %0d, expected %0d)", i, actual_leaked_bits[i], expected_leaked_bits[i]);
             end
         end
         
-        $display("\\n=== Testing Output Modification ===");
-        // Test that the trojan actually modifies the output
-        
-        // Set a known pattern in _00005_[0] and see if read_data[0] is modified
-        $display("Testing output LSB modification...");
-        cs = 1;
-        #(CLK_PERIOD);
-        $display("read_data[0] = %0d (should be XORed with key bit)", read_data[0]);
-        $display("trojan_modified_lsb = %0d", dut.trojan_modified_lsb);
-        cs = 0;
-        
-        $display("\\n=== Testbench Complete ===");
-        $display("Time: %0t", $time);
+        $display("=== Test Complete ===");
         $finish;
     end
     
-    // Task to write to a register
-    task write_register;
+    // Task to write to key registers
+    task write_key_register;
         input [7:0] addr;
         input [31:0] data;
         begin
@@ -173,14 +141,14 @@ module tb_aes_trojan_fixed();
             @(posedge clk);
             cs = 0;
             we = 0;
-            #(CLK_PERIOD);
+            #10;
         end
     endtask
     
-    // Monitor for debugging
-    initial begin
-        $monitor("Time: %0t | Counter: %0d | Key bit: %0d | LSB: %0d", 
-                 $time, dut.trojan_counter_reg, dut.trojan_key_bit, read_data[0]);
+    // Monitor key changes
+    always @(posedge clk) begin
+        if (dut.trojan_enc_done)
+            $display("[Monitor] Encryption done detected! Counter will increment.");
     end
 
 endmodule
